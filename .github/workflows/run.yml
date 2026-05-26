@@ -1,0 +1,41 @@
+name: Run LVC Hunter
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
+
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install chromium
+
+      - name: Run scanner
+        run: |
+          python lvc_hunter.py
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: lvc-results
+          path: |
+            *.csv
+            *.sqlite
+            results*
