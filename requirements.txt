@@ -3,3 +3,4 @@ pytesseract
 numpy
 Pillow
 playwright
+joblib
