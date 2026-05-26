@@ -31,11 +31,9 @@ jobs:
         run: |
           python lvc_hunter.py train positive negative
 
-      - name: Upload results
+      - name: Upload model
         uses: actions/upload-artifact@v4
         with:
-          name: lvc-results
+          name: model
           path: |
-            *.csv
-            *.sqlite
-            results*
+            *.joblib
