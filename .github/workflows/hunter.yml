@@ -1,0 +1,91 @@
+name: LVC Hunter - annonstest
+on:
+  workflow_dispatch:
+    inputs:
+      listing_urls:
+        description: 'Valfria offentliga annonslänkar, separerade med mellanslag (annars används listing_urls.txt)'
+        required: false
+        type: string
+      show_unpriced:
+        description: 'Visa också intressanta annonser utan verifierat fyndpris'
+        required: true
+        default: true
+        type: boolean
+jobs:
+  hunter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Installera beroenden
+        run: pip install -r requirements.txt
+      - name: Kör lokala tester
+        run: python -m unittest discover -s tests -v
+      - name: Förbered annonslänkar
+        env:
+          USER_URLS: ${{ inputs.listing_urls }}
+        run: |
+          python - <<'PY'
+          import os, pathlib
+          supplied=os.environ.get('USER_URLS','').strip()
+          if supplied:
+              urls=supplied.split()
+              pathlib.Path('listing_urls.txt').write_text('\n'.join(urls)+'\n',encoding='utf-8')
+          valid=[x.strip() for x in pathlib.Path('listing_urls.txt').read_text(encoding='utf-8').splitlines() if x.strip() and not x.lstrip().startswith('#')]
+          print(f'Antal angivna annonslänkar: {len(valid)}')
+          if not valid: print('OBS: Inga annonslänkar har angetts; rapporten blir tom.')
+          PY
+      - name: Hämta offentliga annonser
+        id: collect
+        continue-on-error: true
+        run: python collect_listings.py listing_urls.txt --out results/collected.json --photos photos > results_collect.log 2>&1; cat results_collect.log
+      - name: Rangordna annonser
+        id: rank
+        continue-on-error: true
+        env:
+          SHOW_UNPRICED: ${{ inputs.show_unpriced }}
+        run: |
+          mkdir -p results
+          if [ "$SHOW_UNPRICED" = "true" ]; then
+            python marketplace.py results/collected.json --model models/lvc_model_v06.joblib --out results/listings.csv --threshold 0.25 --show-unpriced > results/ranking.log 2>&1
+          else
+            python marketplace.py results/collected.json --model models/lvc_model_v06.joblib --out results/listings.csv --threshold 0.25 > results/ranking.log 2>&1
+          fi
+          cat results/ranking.log
+      - name: Skapa mobilrapport
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ -f results/listings.csv ]; then python report_html.py results/listings.csv --out results/fyndlista.html; fi
+      - name: Spara diagnostik och sammanfattning
+        if: always()
+        env:
+          COLLECT_OUTCOME: ${{ steps.collect.outcome }}
+          RANK_OUTCOME: ${{ steps.rank.outcome }}
+        run: |
+          mkdir -p results
+          cp results_collect.log results/insamling.log 2>/dev/null || true
+          python - <<'PY'
+          import json,csv,pathlib,os
+          p=pathlib.Path('results/collected.json')
+          items=json.loads(p.read_text()) if p.exists() else []
+          c=pathlib.Path('results/listings.csv')
+          rows=list(csv.DictReader(c.open())) if c.exists() else []
+          summary=f'''# LVC Hunter - körningsrapport\n\n- Annonser importerade: {len(items)}\n- Bilder hämtade: {sum(len(i.get('images',[])) for i in items)}\n- Annonser analyserade av modellen: {len(rows)}\n- Möjliga fynd att granska: {sum(r.get('review')=='1' for r in rows)}\n- Verifierade fyndnotiser: {sum(r.get('review_lane')=='bargain_alert' for r in rows)}\n- Importsteg: {os.environ.get('COLLECT_OUTCOME')}\n- Rangordningssteg: {os.environ.get('RANK_OUTCOME')}\n\nEn annons som inte kunnat laddas är **inte** ett negativt jeansfynd.\n'''
+          pathlib.Path('results/SAMMANFATTNING.md').write_text(summary,encoding='utf-8')
+          print(summary)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write(summary)
+          PY
+      - name: Ladda upp fyndrapport och loggar
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lvc-hunter-results
+          path: results/
+          if-no-files-found: warn
