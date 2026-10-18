@@ -67,6 +67,18 @@ def extract_metadata(html, page_url):
                 if isinstance(offers,dict) and offers.get('price') is not None:
                     price=str(offers['price']) + (' '+str(offers.get('priceCurrency','')) if offers.get('priceCurrency') else '')
     images.extend([meta('og:image'),meta('twitter:image')])
+    # Public HTML image elements are a fallback when metadata is absent.
+    # Do not include decorative logos/icons or data URIs.
+    if not images or not any(images):
+        for tag in soup.find_all('img'):
+            candidates=[tag.get('src'),tag.get('data-src'),tag.get('data-original')]
+            srcset=tag.get('srcset') or tag.get('data-srcset') or ''
+            if srcset:
+                candidates.extend(part.strip().split(' ')[0] for part in srcset.split(','))
+            for candidate in candidates:
+                if candidate and not candidate.startswith(('data:', 'blob:')):
+                    images.append(candidate)
+
     cleaned=[];seen=set()
     for candidate in images:
         if not candidate:continue
@@ -109,6 +121,17 @@ def collect(urls,output,photos,download=True,delay=1.5,session=None):
             response.raise_for_status()
             if platform_of(response.url)!=platform:raise ValueError('Redirected outside original marketplace')
             data=extract_metadata(response.text,response.url)
+            if not data['image_urls']:
+                # Empty extraction must not silently count as success.
+                html=response.text
+                soup=BeautifulSoup(html,'html.parser')
+                page_title=soup.title.get_text(' ',strip=True)[:120] if soup.title else ''
+                errors.append({'url':url,'error':'No public image URLs found in HTML',
+                               'http_status':response.status_code,
+                               'content_type':response.headers.get('content-type','')[:100],
+                               'html_bytes':len(response.content),
+                               'page_title':page_title,
+                               'script_count':len(soup.find_all('script'))})
             images=[]
             if download:
                 for j,img in enumerate(data['image_urls']):
