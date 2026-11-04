@@ -87,6 +87,39 @@ def extract_metadata(html, page_url):
             cleaned.append(u);seen.add(u)
     return {'title':str(title)[:300], 'price':str(price)[:100], 'image_urls':cleaned[:12]}
 
+def browser_metadata(url, timeout_ms=25000):
+    """Read a public listing in Chromium if static HTML has no product images.
+
+    No login, CAPTCHA handling, stealth plugins or restriction bypass.
+    Returns both metadata and limited diagnostics for troubleshooting.
+    """
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 900}, locale="sv-SE")
+            response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass  # Some pages continuously poll; inspect their current DOM.
+            page.wait_for_timeout(1200)
+            final_url = page.url
+            if platform_of(final_url) != platform_of(url):
+                raise ValueError("Browser redirected outside original marketplace")
+            html = page.content()
+            data = extract_metadata(html, final_url)
+            diagnostics = {
+                "browser_status": response.status if response else None,
+                "browser_final_url": final_url,
+                "browser_title": page.title()[:120],
+                "browser_html_bytes": len(html.encode("utf-8")),
+                "browser_images": len(data["image_urls"]),
+            }
+            return data, diagnostics
+        finally:
+            browser.close()
+
 def download_image(session,url,dest,max_bytes=8_000_000):
     if not http_url(url):raise ValueError('Non-HTTPS image URL')
     with session.get(url,stream=True,timeout=18,allow_redirects=True) as r:
@@ -106,7 +139,7 @@ def download_image(session,url,dest,max_bytes=8_000_000):
         if count<200:target.unlink(missing_ok=True);raise ValueError('Image too small')
         return str(target)
 
-def collect(urls,output,photos,download=True,delay=1.5,session=None):
+def collect(urls,output,photos,download=True,delay=1.5,session=None,use_browser=True):
     session=session or requests.Session();session.headers.update(HEADERS)
     listings=[];errors=[];seen=set()
     for idx,url in enumerate(urls):
@@ -121,6 +154,14 @@ def collect(urls,output,photos,download=True,delay=1.5,session=None):
             response.raise_for_status()
             if platform_of(response.url)!=platform:raise ValueError('Redirected outside original marketplace')
             data=extract_metadata(response.text,response.url)
+            browser_info = {}
+            if not data['image_urls'] and use_browser:
+                try:
+                    browser_data, browser_info = browser_metadata(response.url)
+                    if browser_data['image_urls']:
+                        data = browser_data
+                except Exception as exc:
+                    browser_info = {'browser_error': str(exc)[:250]}
             if not data['image_urls']:
                 # Empty extraction must not silently count as success.
                 html=response.text
@@ -131,7 +172,7 @@ def collect(urls,output,photos,download=True,delay=1.5,session=None):
                                'content_type':response.headers.get('content-type','')[:100],
                                'html_bytes':len(response.content),
                                'page_title':page_title,
-                               'script_count':len(soup.find_all('script'))})
+                               'script_count':len(soup.find_all('script')), **browser_info})
             images=[]
             if download:
                 for j,img in enumerate(data['image_urls']):
@@ -155,8 +196,9 @@ def main():
     ap.add_argument('--photos',default='photos')
     ap.add_argument('--metadata-only',action='store_true',help='Do not download images')
     ap.add_argument('--delay',type=float,default=1.5)
+    ap.add_argument('--no-browser',action='store_true',help='Disable Chromium fallback')
     args=ap.parse_args()
     if args.delay<0:ap.error('--delay must be >= 0')
-    result=collect(Path(args.urls).read_text(encoding='utf-8').splitlines(),Path(args.out),Path(args.photos),not args.metadata_only,args.delay)
+    result=collect(Path(args.urls).read_text(encoding='utf-8').splitlines(),Path(args.out),Path(args.photos),not args.metadata_only,args.delay,use_browser=not args.no_browser)
     print(json.dumps(result,ensure_ascii=False,indent=2))
 if __name__=='__main__':main()
